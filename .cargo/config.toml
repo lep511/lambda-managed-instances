@@ -1,0 +1,11 @@
+[build]
+target = "aarch64-unknown-linux-gnu"
+
+[target.aarch64-unknown-linux-gnu]
+# neoverse-v2 = Graviton4 microarchitecture.
+# Enables SVE2, SVE, NEON, and all Neoverse V2 ISA extensions.
+rustflags = [
+    "-C", "target-cpu=neoverse-v2",
+    "-C", "target-feature=+sve2,+sve,+neon,+aes,+sha2,+sha3",
+    "-C", "link-arg=-lgcc",
+]
