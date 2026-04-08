@@ -1,4 +1,4 @@
-use lambda_runtime::{run, service_fn, Error};
+use lambda_runtime::{run_concurrent, service_fn, Error};
 use tracing_subscriber::fmt;
 use tracing_subscriber::EnvFilter;
 
@@ -20,5 +20,8 @@ async fn main() -> Result<(), Error> {
         .without_time() // Lambda adds timestamps automatically
         .init();
 
-    run(service_fn(function_handler)).await
+    let func = service_fn(function_handler);
+    run_concurrent(func).await?;
+    
+    Ok(())
 }

@@ -1,6 +1,5 @@
 use lambda_runtime::{Error, LambdaEvent};
 use serde_json::Value;
-use rayon::prelude::*;
 use serde::Serialize;
 use std::hint::black_box;
 use std::time::Instant;
@@ -48,14 +47,12 @@ struct StressTestResult {
 }
 
 #[derive(Serialize)]
-struct ParallelBenchmark {
+struct ConcurrencyReadiness {
     description: String,
     total_factorizations: usize,
-    sequential_ms: f64,
-    parallel_ms: f64,
-    speedup_factor: f64,
-    threads_used: usize,
-    efficiency_percent: f64,
+    single_thread_ms: f64,
+    throughput_per_sec: f64,
+    avg_factorization_us: f64,
     verdict: String,
 }
 
@@ -568,18 +565,15 @@ pub(crate)async fn function_handler(event: LambdaEvent<Value>) -> Result<(), Err
     let _payload = event.payload;
     tracing::info!(request_id = %request_id, %function_name, "Invocation started");
 
-    let threads = num_cpus::get();
     let total_start = Instant::now();
 
-    // Warmup: initialize Rayon thread pool and warm CPU caches
+    // Warmup: prime CPU caches and branch predictor on single thread
     let warmup_n = 99_999_971u64 * 99_999_989;
-    (0..threads).into_par_iter().for_each(|_| {
-        for _ in 0..20 {
-            let mut f = Vec::new();
-            factorize(warmup_n, &mut f);
-            black_box(&f);
-        }
-    });
+    for _ in 0..20 {
+        let mut f = Vec::new();
+        factorize(warmup_n, &mut f);
+        black_box(&f);
+    }
 
     // ── 1. Run categories (sequential iteration for accurate per-test timing) ──
 
@@ -685,70 +679,51 @@ pub(crate)async fn function_handler(event: LambdaEvent<Value>) -> Result<(), Err
         })
         .collect();
 
-    // ── 3. Parallel benchmark: enough work per task to show real speedup ───────
+    // ── 3. Concurrency readiness: measure single-thread throughput ────────────
 
     let hard_number = 999_999_751u64 * 999_999_883;
-    let batches = 8usize;
-    let iters_per_batch = 200usize;
-    let total_iters = batches * iters_per_batch;
+    let total_iters = 1_600usize;
 
-    // Sequential: all batches one after another
-    let seq_start = Instant::now();
+    let throughput_start = Instant::now();
     for _ in 0..total_iters {
         let mut factors = Vec::new();
         factorize(hard_number, &mut factors);
         black_box(&factors);
     }
-    let sequential_ms = seq_start.elapsed().as_secs_f64() * 1000.0;
-
-    // Parallel: batches distributed across threads
-    let par_start = Instant::now();
-    (0..batches).into_par_iter().for_each(|_| {
-        for _ in 0..iters_per_batch {
-            let mut factors = Vec::new();
-            factorize(hard_number, &mut factors);
-            black_box(&factors);
-        }
-    });
-    let parallel_ms = par_start.elapsed().as_secs_f64() * 1000.0;
-
-    let speedup = if parallel_ms > 0.0 {
-        sequential_ms / parallel_ms
+    let single_thread_ms = throughput_start.elapsed().as_secs_f64() * 1000.0;
+    let throughput_per_sec = if single_thread_ms > 0.0 {
+        total_iters as f64 / (single_thread_ms / 1000.0)
     } else {
         0.0
     };
-    let efficiency = speedup / threads as f64 * 100.0;
+    let avg_factorization_us = (single_thread_ms * 1000.0) / total_iters as f64;
 
-    let verdict = if speedup >= 1.5 {
+    let verdict = if avg_factorization_us < 50.0 {
         format!(
-            "Excellent: {:.2}x speedup with {} threads ({:.0}% efficient)",
-            speedup, threads, efficiency
+            "Excellent: {:.0} factorizations/sec — sub-50us average, ideal for LMI multi-concurrency",
+            throughput_per_sec
         )
-    } else if speedup >= 1.1 {
+    } else if avg_factorization_us < 200.0 {
         format!(
-            "Good: {:.2}x speedup with {} threads ({:.0}% efficient)",
-            speedup, threads, efficiency
+            "Good: {:.0} factorizations/sec — fast enough for concurrent invocation model",
+            throughput_per_sec
         )
-    } else if speedup >= 0.9 {
-        "Neutral: parallelism overhead roughly equals computation gain".to_string()
     } else {
         format!(
-            "Overhead-bound: {:.2}x — tasks too small for {} threads to help",
-            speedup, threads
+            "Adequate: {:.0} factorizations/sec — consider optimizing hot path for better LMI throughput",
+            throughput_per_sec
         )
     };
 
-    let parallel_benchmark = ParallelBenchmark {
+    let concurrency_readiness = ConcurrencyReadiness {
         description: format!(
-            "{} batches × {} iterations of hardest semiprime = {} total factorizations",
-            batches, iters_per_batch, total_iters
+            "{} factorizations of hardest semiprime on single thread (LMI concurrency model)",
+            total_iters
         ),
         total_factorizations: total_iters,
-        sequential_ms: round2(sequential_ms),
-        parallel_ms: round2(parallel_ms),
-        speedup_factor: round2(speedup),
-        threads_used: threads,
-        efficiency_percent: round2(efficiency),
+        single_thread_ms: round2(single_thread_ms),
+        throughput_per_sec: round2(throughput_per_sec),
+        avg_factorization_us: round2(avg_factorization_us),
         verdict,
     };
 
@@ -788,7 +763,6 @@ pub(crate)async fn function_handler(event: LambdaEvent<Value>) -> Result<(), Err
 
     tracing::info!(
         request_id = %request_id,
-        threads_available = threads,
         "Benchmark started"
     );
 
@@ -832,14 +806,12 @@ pub(crate)async fn function_handler(event: LambdaEvent<Value>) -> Result<(), Err
 
     tracing::info!(
         request_id = %request_id,
-        total_factorizations = parallel_benchmark.total_factorizations,
-        sequential_ms = parallel_benchmark.sequential_ms,
-        parallel_ms = parallel_benchmark.parallel_ms,
-        speedup_factor = parallel_benchmark.speedup_factor,
-        threads_used = parallel_benchmark.threads_used,
-        efficiency_percent = parallel_benchmark.efficiency_percent,
-        verdict = %parallel_benchmark.verdict,
-        "Parallel benchmark completed"
+        total_factorizations = concurrency_readiness.total_factorizations,
+        single_thread_ms = concurrency_readiness.single_thread_ms,
+        throughput_per_sec = concurrency_readiness.throughput_per_sec,
+        avg_factorization_us = concurrency_readiness.avg_factorization_us,
+        verdict = %concurrency_readiness.verdict,
+        "Concurrency readiness benchmark completed"
     );
 
     tracing::info!(
@@ -866,9 +838,8 @@ pub(crate)async fn function_handler(event: LambdaEvent<Value>) -> Result<(), Err
             ("TotalFactorizations", summary.total_factorizations as f64, "Count"),
             ("AvgFactorizationUs", summary.single_factorization_stats.avg_us, "Microseconds"),
             ("P95FactorizationUs", summary.single_factorization_stats.p95_us, "Microseconds"),
-            ("ParallelSpeedup", parallel_benchmark.speedup_factor, "None"),
-            ("ThreadsUsed", parallel_benchmark.threads_used as f64, "Count"),
-            ("ParallelEfficiency", parallel_benchmark.efficiency_percent, "Percent"),
+            ("SingleThreadThroughput", concurrency_readiness.throughput_per_sec, "Count/Second"),
+            ("AvgHardFactorizationUs", concurrency_readiness.avg_factorization_us, "Microseconds"),
         ],
     );
 

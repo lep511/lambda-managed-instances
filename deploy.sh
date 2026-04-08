@@ -37,7 +37,7 @@ if aws lambda get-function --region "$AWS_REGION" --function-name "$FUNCTION_NAM
     --function-name "$FUNCTION_NAME" \
     --zip-file "fileb://$ZIP_FILE"
 
-  echo "Waiting for update to complete..."
+  echo "Waiting for code update to complete..."
   aws lambda wait function-updated-v2 \
     --region "$AWS_REGION" \
     --function-name "$FUNCTION_NAME"
