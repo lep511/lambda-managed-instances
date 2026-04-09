@@ -1,4 +1,4 @@
-use lambda_runtime::{run_concurrent, service_fn, Error};
+use lambda_runtime::{run_concurrent, service_fn, spawn_graceful_shutdown_handler, Error};
 use tracing_subscriber::fmt;
 use tracing_subscriber::EnvFilter;
 
@@ -19,6 +19,11 @@ async fn main() -> Result<(), Error> {
         .with_current_span(false)
         .without_time() // Lambda adds timestamps automatically
         .init();
+
+    spawn_graceful_shutdown_handler(|| async {
+        tracing::info!("Graceful shutdown initiated");
+    })
+    .await;
 
     let func = service_fn(function_handler);
     run_concurrent(func).await?;

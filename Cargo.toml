@@ -8,7 +8,7 @@ name = "bootstrap"
 path = "src/main.rs"
  
 [dependencies]
-lambda_runtime = { version = "1.1.2", features = ["concurrency-tokio"] }
+lambda_runtime = { version = "1.1.2", features = ["concurrency-tokio", "graceful-shutdown"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

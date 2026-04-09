@@ -9,6 +9,7 @@ A Rust-based AWS Lambda function that benchmarks CPU-intensive integer factoriza
 - **Concurrency model:** LMI multi-concurrency via `run_concurrent()` — each invocation runs single-threaded; the Lambda runtime handles multiple concurrent requests as independent Tokio async tasks
 - **Memory:** 4096 MB
 - **Timeout:** 180 seconds
+- **Graceful shutdown:** `spawn_graceful_shutdown_handler()` — registers a SIGTERM hook for cleanup before the execution environment is terminated (~500ms budget)
 - **Tracing:** AWS X-Ray (Active)
 
 ## Lambda Managed Instances – Rust-Focused Summary
@@ -47,6 +48,24 @@ Rust uses the **OS-only runtime** and runs handlers as Tokio async tasks within 
 - VPC connectivity is mandatory; without it, logs and traces are silently lost
 - `publish = true` is required — LMI runs on published versions, not `$LATEST`
 
+**Graceful shutdown lifecycle**
+
+LMI execution environments are long-lived but eventually shut down (scale-in, rebalancing, deployments). The Lambda runtime sends SIGTERM to signal imminent termination, followed by SIGKILL after ~500ms. The `spawn_graceful_shutdown_handler()` function from `lambda_runtime` registers an async closure that executes during this window:
+
+```rust
+spawn_graceful_shutdown_handler(|| async {
+    tracing::info!("Graceful shutdown initiated");
+    // Flush buffered logs, close DB pools, abort multipart uploads, etc.
+})
+.await;
+```
+
+Key details:
+- Must be called **before** `run_concurrent()` — it registers an internal no-op Lambda extension (`_lambda-rust-runtime-no-op-graceful-shutdown-helper`) that subscribes to shutdown events
+- Requires the `graceful-shutdown` feature flag on `lambda_runtime`
+- The closure must complete within ~500ms or the process is forcefully killed via SIGKILL
+- Currently logs the shutdown event; extend the closure when adding stateful resources (connection pools, non-blocking log appenders, caches)
+
 ## What It Does
 
 Each invocation runs a comprehensive factorization benchmark:
@@ -82,7 +101,7 @@ Each invocation runs a comprehensive factorization benchmark:
 ├── Cargo.toml            # Dependencies and release profile (LTO, single CGU, strip)
 ├── .cargo/config.toml    # Cross-compilation target and Graviton4 rustflags
 ├── src/
-│   ├── main.rs               # Entrypoint — structured logging, run_concurrent() for LMI
+│   ├── main.rs               # Entrypoint — logging, graceful shutdown hook, run_concurrent()
 │   ├── event_handler.rs      # Benchmark handler — factorization, test suites, EMF metrics
 │   └── generic_handler.rs    # Example request/response handler (unused, for reference)
 ├── deploy.sh             # Build, package, and deploy/update the Lambda function
