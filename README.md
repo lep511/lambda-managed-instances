@@ -1,4 +1,4 @@
-# CPU-Optimized Lambda Function
+# Lambda Managed Instances with Rust
 
 A Rust-based AWS Lambda function that benchmarks CPU-intensive integer factorization on **ARM64 (Graviton4)** instances using **Lambda Managed Instances (LMI)** for multi-concurrency. It exercises deterministic Miller-Rabin primality testing and Pollard's rho factorization (Brent's variant) across a suite of test cases, then reports structured results and CloudWatch metrics.
 
@@ -12,7 +12,7 @@ A Rust-based AWS Lambda function that benchmarks CPU-intensive integer factoriza
 - **Graceful shutdown:** `spawn_graceful_shutdown_handler()` — registers a SIGTERM hook for cleanup before the execution environment is terminated (~500ms budget)
 - **Tracing:** AWS X-Ray (Active)
 
-## Lambda Managed Instances – Rust-Focused Summary
+## Rust-Focused Summary
 
 **What is LMI?**
 Lambda Managed Instances runs functions on EC2 instances inside your VPC, allowing multiple concurrent requests per execution environment — unlike standard Lambda's one-request-per-environment model. Announced at re:Invent 2025, with 32 GB / 16 vCPU support added in March 2026.
@@ -268,3 +268,108 @@ P99/P50 ratio < 1.01 — virtually zero variance. Graviton4 delivers predictable
 - `all_verified: true` on every invocation — all factorizations mathematically verified
 - No core contention under concurrent load, confirming the single-threaded-per-invocation model works well with LMI
 - 3,134 total factorizations per invocation completing in ~6.3 seconds
+
+## Estimated Duration
+
+Calculate the cost difference between Lambda Managed Instances and standard Lambda using the CPU-intensive prime factorization workload from this workshop.
+
+**Important Disclaimer**: This cost analysis is based on specific assumptions for this workshop's workload and is provided as a reference example only. Your actual costs will vary based on your workload characteristics, traffic patterns, instance types, regions, and configuration choices. Always calculate costs for your specific use case using the [AWS Pricing Calculator](https://calculator.aws.amazon.com/) or consult your AWS account team for accurate pricing guidance.
+
+## Cost Model Assumptions
+
+This cost analysis is based on the following configuration:
+
+| Configuration Parameter | Value | Impact on Cost |
+| --- | --- | --- |
+| **EC2 Instance Family** | c7g.xlarge (4 vCPUs, 8 GB) | Determines hourly EC2 cost (~$0.145/hr) |
+| **Number of EC2 Instances** | 9 (for 100 concurrent requests) | Baseline cost: 9 × $0.145 × 730 = $952.65/month |
+| **Max Concurrency per Environment** | 1 (optimized for CPU) | ~1 per vCPU for optimal performance |
+| **Workload Type** | CPU-intensive | Requires low concurrency |
+| **Function Memory** | 4096 MB (4 GB) | 2:1 memory-to-vCPU ratio (see Function Deployment chapter) |
+| **Duration** | 45s (LMI optimized) / 60s (Standard) | LMI 25% faster with dedicated compute |
+| **Peak Concurrency** | 100 concurrent requests | Determines instance count needed |
+
+Concurrency Configuration
+
+**Configuration Note**: For detailed guidance on configuring "Maximum concurrency per execution environment" for CPU-intensive vs I/O-bound workloads, see the Performance Comparison chapter.
+
+## Pricing Model
+
+| Component | Standard Lambda | Lambda Managed Instances |
+| --- | --- | --- |
+| **Requests** | $0.20 per 1M requests | $0.20 per 1M requests |
+| **Compute** | $0.0000133333 per GB-second (ARM) | EC2 instance cost + 15% management fee |
+| **Baseline** | $0 (pay per use) | Scales with concurrency needs |
+
+## Cost Comparison: 1 Million Requests/Month
+
+Scenario: 1M requests/month with 100 peak concurrent requests.
+
+**Capacity Planning:**
+
+- 100 concurrent requests ÷ 1 (max concurrency per env) = 100 environments needed
+- 100 environments ÷ 12 (envs per c7g.xlarge) = 9 instances
+
+### Standard Lambda Cost
+
+```
+Requests: 1M × $0.20/M = $0.20
+Compute: 1M × 60s × 4.096 GB × $0.0000133333/GB-s = $3,277.99
+
+Total: $3,278/month
+With 17% Compute Savings Plan: $2,721/month
+```
+
+### Lambda Managed Instances Cost
+
+```
+Requests: 1M × $0.20/M = $0.20
+Compute: 9 × $0.145/hr × 730 hrs × 1.15 (15% fee) = $1,095.55
+
+Total: $1,096/month
+With 72% EC2 Savings Plan: $412/month
+With 75% Reserved Instances: $329/month
+```
+
+### Cost Comparison
+
+| Scenario | Standard Lambda | Standard (SP) | LMI | LMI (SP) | LMI (RI) |
+| --- | --- | --- | --- | --- | --- |
+| **Total** | **$3,278** | **$2,721** | **$1,096** | **$412** | **$329** |
+| **Savings** | \- | 17% | 67% | 87% | 90% |
+
+## Scaling to Higher Volumes
+
+| Volume | Concurrent | Instances | Standard | Standard (SP) | LMI (RI) | Savings |
+| --- | --- | --- | --- | --- | --- | --- |
+| **1M/month** | 100 | 9 | $3,278 | $2,721 | $329 | 90% |
+| **10M/month** | 1,000 | 84 | $32,782 | $27,209 | $3,062 | 91% |
+| **100M/month** | 10,000 | 834 | $327,820 | $272,091 | $30,405 | 91% |
+
+**Assumptions:** Concurrency scales linearly with volume. Max concurrency = 1 per environment. ~12 environments per c7g.xlarge.
+
+## Break-Even Analysis
+
+**Monthly requests needed to justify LMI (9 instances = $1,096):**
+
+```
+Standard Lambda: $0.003278 per request
+Break-even: $1,096 / $0.003278 ≈ 334,000 requests/month
+```
+
+## Cost Optimization Strategies
+
+| Strategy | Standard Lambda | Lambda Managed Instances |
+| --- | --- | --- |
+| **Savings Plans** | Compute SP: 17% | EC2 Instance SP: 72% |
+| **Reserved Instances** | Not applicable | Up to 75% |
+| **Right-sizing** | Adjust memory allocation | Choose optimal instance type |
+| **Concurrency Config** | N/A | ~1 per vCPU, tune based on latency SLA |
+| **Utilization** | N/A (pay per use) | Keep instances busy (>80%) |
+
+## Key Takeaways
+
+- **90%+ cost savings** for CPU-intensive workloads (>40s duration) with proper configuration
+- **Configuration is critical**: See Performance Comparison chapter for concurrency tuning guidance
+- **Savings Plans**: 72-75% for LMI vs 17% for standard Lambda
+- **Instance count scales with concurrency**: Plan capacity based on peak concurrent requests
